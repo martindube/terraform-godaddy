@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 
 	"github.com/hashicorp/terraform/helper/schema"
-	"github.com/n3integration/terraform-godaddy/api"
+	"github.com/martindube/terraform-godaddy/api"
 )
 
 type domainRecordResource struct {
@@ -17,20 +18,9 @@ type domainRecordResource struct {
 	NSRecords []string
 }
 
+// Warning: This array cannot be empty. Seems to be a godaddy limitation.
 var defaultRecords = []*api.DomainRecord{
-	// A Records
-	{Type: api.AType, Name: "@", Data: "50.63.202.43", TTL: 600},
-	// CNAME Records
-	{Type: api.CNameType, Name: "email", Data: "email.secureserver.net", TTL: api.DefaultTTL},
-	{Type: api.CNameType, Name: "ftp", Data: "@", TTL: api.DefaultTTL},
-	{Type: api.CNameType, Name: "www", Data: "@", TTL: api.DefaultTTL},
-	{Type: api.CNameType, Name: "_domainconnect", Data: "_domainconnect.api.domaincontrol.com", TTL: api.DefaultTTL},
-	// MX Records
-	{Type: api.MXType, Name: "@", Data: "mailstore1.secureserver.net", TTL: api.DefaultTTL, Priority: 10},
-	{Type: api.MXType, Name: "@", Data: "smtp.secureserver.net", TTL: api.DefaultTTL, Priority: 0},
-	// NS Records
-	{Type: api.NSType, Name: "@", Data: "ns45.domaincontrol.com", TTL: api.DefaultTTL},
-	{Type: api.NSType, Name: "@", Data: "ns46.domaincontrol.com", TTL: api.DefaultTTL},
+	{Type: api.TXTType, Name: "@", Data: "Domain Deleted :)", TTL: api.DefaultTTL, Priority: 0},
 }
 
 func newDomainRecordResource(d *schema.ResourceData) (domainRecordResource, error) {
@@ -187,6 +177,21 @@ func resourceDomainRecordRead(d *schema.ResourceData, meta interface{}) error {
 
 func resourceDomainRecordUpdate(d *schema.ResourceData, meta interface{}) error {
 	client := meta.(*api.Client)
+
+	// If no nameservers are set, get current NS records.
+	if _, ok := d.GetOk("nameservers"); !ok {
+		customer := d.Get("customer").(string)
+		domain := d.Get("domain").(string)
+
+		log.Println("Fetching", domain, "records...")
+		records, err := client.GetDomainRecords(customer, domain)
+		if err != nil {
+			return fmt.Errorf("couldn't find domain record (%s): %s", domain, err.Error())
+		}
+
+		err = populateNSFromResponse(records, d)
+	}
+
 	r, err := newDomainRecordResource(d)
 	if err != nil {
 		return err
@@ -198,7 +203,14 @@ func resourceDomainRecordUpdate(d *schema.ResourceData, meta interface{}) error 
 
 	log.Println("Updating", r.Domain, "domain records...")
 	r.converge()
-	return client.UpdateDomainRecords(r.Customer, r.Domain, r.Records)
+	err = client.UpdateDomainRecords(r.Customer, r.Domain, r.Records)
+
+	// Ignore name server validation errors
+	if err != nil && strings.Contains(err.Error(), "422:FAILED_NAME_SERVER_VALIDATION") {
+		log.Printf("Warning: Nameserver were not changed: %s", err.Error())
+		return nil
+	}
+	return err
 }
 
 func resourceDomainRecordRestore(d *schema.ResourceData, meta interface{}) error {
@@ -212,8 +224,18 @@ func resourceDomainRecordRestore(d *schema.ResourceData, meta interface{}) error
 		return err
 	}
 
+	r.Records = defaultRecords
+	r.mergeRecords(r.NSRecords, api.NewNSRecord)
+
 	log.Println("Restoring", r.Domain, "domain records...")
-	return client.UpdateDomainRecords(r.Customer, r.Domain, defaultRecords)
+	err = client.UpdateDomainRecords(r.Customer, r.Domain, r.Records)
+
+	// Ignore name server validation errors
+	if err != nil && strings.Contains(err.Error(), "422:FAILED_NAME_SERVER_VALIDATION") {
+		log.Printf("Warning: Nameserver were not changed: %s", err.Error())
+		return nil
+	}
+	return err
 }
 
 func populateDomainInfo(client *api.Client, r *domainRecordResource, d *schema.ResourceData) error {
@@ -227,6 +249,20 @@ func populateDomainInfo(client *api.Client, r *domainRecordResource, d *schema.R
 	}
 
 	d.SetId(strconv.FormatInt(domain.ID, 10))
+	return nil
+}
+
+func populateNSFromResponse(r []*api.DomainRecord, d *schema.ResourceData) error {
+	nsRecords := make([]string, 0)
+
+	for _, rec := range r {
+		if api.IsDefaultNSRecord(rec) {
+			nsRecords = append(nsRecords, rec.Data)
+		}
+	}
+
+	d.Set("nameservers", nsRecords)
+
 	return nil
 }
 

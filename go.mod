@@ -1,4 +1,4 @@
-module github.com/n3integration/terraform-godaddy
+module github.com/martindube/terraform-godaddy
 
 require (
 	cloud.google.com/go v0.34.0 // indirect

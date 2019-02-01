@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/n3integration/terraform-godaddy/api"
+	"github.com/martindube/terraform-godaddy/api"
 )
 
 // Config provides the provider's configuration
